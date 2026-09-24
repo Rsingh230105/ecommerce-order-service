@@ -1,6 +1,9 @@
 services:
   order-service:
     build: .
+    networks:
+      - default
+      - ecommerce-network
     container_name: ecommerce-order-service
     ports:
       - "8001:8001"
@@ -10,6 +13,7 @@ services:
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ecommerce
+      PRODUCT_SERVICE_URL: http://product-service:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,3 +38,7 @@ services:
 
 volumes:
   ecommerce_order_postgres_data:
+
+networks:
+  ecommerce-network:
+    external: true

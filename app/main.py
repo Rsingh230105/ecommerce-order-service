@@ -1,22 +1,19 @@
 import os
+from uuid import uuid4
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import Order
+from app.models import Order, OutboxEvent
 from app.schemas import OrderCreate, OrderResponse, OrderUpdate
 
 load_dotenv()
 
-PRODUCT_SERVICE_URL = os.getenv(
-    "PRODUCT_SERVICE_URL",
-    "http://localhost:8000"
-)
-
-
+PRODUCT_SERVICE_URL = os.getenv("PRODUCT_SERVICE_URL") or "http://product-service:8000"
 
 app = FastAPI(
     title="E-Commerce Order Service",
@@ -71,13 +68,8 @@ def create_order(
     order: OrderCreate,
     db: Session = Depends(get_db)
 ):
-    # Get product details from Product Service
     product = get_product(order.product_id)
-
-    # Get actual price from Product Service
-    product_price = product["price"]
-
-    # Calculate total amount
+    product_price = float(product["price"])
     total_amount = order.quantity * product_price
 
     new_order = Order(
@@ -88,9 +80,39 @@ def create_order(
         status="PENDING"
     )
 
-    db.add(new_order)
-    db.commit()
-    db.refresh(new_order)
+    try:
+        db.add(new_order)
+        db.flush()
+
+        event_id = str(uuid4())
+        event_payload = {
+            "event_id": event_id,
+            "event_type": "ORDER_CREATED",
+            "order_id": new_order.id,
+            "product_id": new_order.product_id,
+            "quantity": new_order.quantity,
+            "price": new_order.price,
+            "total_amount": new_order.total_amount,
+            "status": new_order.status,
+        }
+
+        outbox_event = OutboxEvent(
+            event_id=event_id,
+            event_type="ORDER_CREATED",
+            aggregate_type="order",
+            aggregate_id=new_order.id,
+            payload=event_payload,
+            status="PENDING",
+        )
+        db.add(outbox_event)
+        db.commit()
+        db.refresh(new_order)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Order could not be created"
+        ) from exc
 
     return new_order
 

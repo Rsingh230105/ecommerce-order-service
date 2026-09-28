@@ -1,9 +1,58 @@
-from fastapi.testclient import TestClient
+from datetime import datetime
+from uuid import UUID
 
+from fastapi.testclient import TestClient
+from sqlalchemy.exc import SQLAlchemyError
+
+from app import main
 from app.main import app
+from app.models import Order, OutboxEvent
 
 
 client = TestClient(app)
+
+
+class FakeSession:
+    def __init__(self, fail_on_flush=False):
+        self.added = []
+        self.commit_count = 0
+        self.rollback_count = 0
+        self.fail_on_flush = fail_on_flush
+
+    def add(self, instance):
+        self.added.append(instance)
+
+    def flush(self):
+        if self.fail_on_flush:
+            raise SQLAlchemyError("flush failed")
+
+        order = next(instance for instance in self.added if isinstance(instance, Order))
+        order.id = 101
+        order.created_at = datetime.utcnow()
+        order.updated_at = order.created_at
+
+    def commit(self):
+        self.commit_count += 1
+
+    def refresh(self, instance):
+        return None
+
+    def rollback(self):
+        self.rollback_count += 1
+
+    def close(self):
+        return None
+
+
+def override_db(session):
+    def dependency():
+        return session
+
+    app.dependency_overrides[main.get_db] = dependency
+
+
+def clear_db_override():
+    app.dependency_overrides.pop(main.get_db, None)
 
 
 def test_health_check():
@@ -17,13 +66,87 @@ def test_health_check():
     assert data["service"] == "order-service"
 
 
+def test_create_order_stores_order_and_outbox_event_in_one_commit(monkeypatch):
+    session = FakeSession()
+    override_db(session)
+    monkeypatch.setattr(main, "get_product", lambda product_id: {"price": 25.0})
+
+    try:
+        response = client.post(
+            "/orders",
+            json={"product_id": 2, "quantity": 3},
+        )
+    finally:
+        clear_db_override()
+
+    assert response.status_code == 200
+    order = next(instance for instance in session.added if isinstance(instance, Order))
+    outbox_event = next(
+        instance for instance in session.added if isinstance(instance, OutboxEvent)
+    )
+
+    assert session.commit_count == 1
+    assert outbox_event.aggregate_id == order.id == 101
+    assert UUID(outbox_event.event_id).version == 4
+    assert outbox_event.payload["event_id"] == outbox_event.event_id
+    assert outbox_event.payload == {
+        "event_id": outbox_event.event_id,
+        "event_type": "ORDER_CREATED",
+        "order_id": 101,
+        "product_id": 2,
+        "quantity": 3,
+        "price": 25.0,
+        "total_amount": 75.0,
+        "status": "PENDING",
+    }
+    assert outbox_event.event_type == "ORDER_CREATED"
+    assert outbox_event.aggregate_type == "order"
+    assert outbox_event.status == "PENDING"
+    assert outbox_event.event_id
+
+
+def test_create_order_does_not_publish_to_sns(monkeypatch):
+    session = FakeSession()
+    override_db(session)
+    monkeypatch.setattr(main, "get_product", lambda product_id: {"price": 25.0})
+
+    try:
+        response = client.post(
+            "/orders",
+            json={"product_id": 2, "quantity": 3},
+        )
+    finally:
+        clear_db_override()
+
+    assert response.status_code == 200
+    assert not hasattr(main, "sns_client")
+
+
+def test_create_order_rolls_back_when_flush_fails(monkeypatch):
+    session = FakeSession(fail_on_flush=True)
+    override_db(session)
+    monkeypatch.setattr(main, "get_product", lambda product_id: {"price": 25.0})
+
+    try:
+        response = client.post(
+            "/orders",
+            json={"product_id": 2, "quantity": 3},
+        )
+    finally:
+        clear_db_override()
+
+    assert response.status_code == 500
+    assert session.commit_count == 0
+    assert session.rollback_count == 1
+    assert not any(isinstance(instance, OutboxEvent) for instance in session.added)
+
+
 def test_create_order():
     response = client.post(
         "/orders",
         json={
             "product_id": 2,
-            "quantity": 3,
-            "price": 55000
+            "quantity": 3
         }
     )
 
@@ -33,8 +156,8 @@ def test_create_order():
 
     assert data["product_id"] == 2
     assert data["quantity"] == 3
-    assert data["price"] == 55000
-    assert data["total_amount"] == 165000
+    assert data["price"] > 0
+    assert data["total_amount"] == data["price"] * 3
     assert data["status"] == "PENDING"
 
     assert "id" in data
@@ -53,13 +176,11 @@ def test_get_orders():
 
 
 def test_get_order_by_id():
-    # Create an order first
     create_response = client.post(
         "/orders",
         json={
-            "product_id": 10,
-            "quantity": 2,
-            "price": 1000
+            "product_id": 2,
+            "quantity": 2
         }
     )
 
@@ -67,7 +188,6 @@ def test_get_order_by_id():
 
     order_id = create_response.json()["id"]
 
-    # Get the created order
     response = client.get(f"/orders/{order_id}")
 
     assert response.status_code == 200
@@ -75,10 +195,10 @@ def test_get_order_by_id():
     data = response.json()
 
     assert data["id"] == order_id
-    assert data["product_id"] == 10
+    assert data["product_id"] == 2
     assert data["quantity"] == 2
-    assert data["price"] == 1000
-    assert data["total_amount"] == 2000
+    assert data["price"] > 0
+    assert data["total_amount"] == data["price"] * 2
 
 
 def test_get_order_not_found():
@@ -92,13 +212,11 @@ def test_get_order_not_found():
 
 
 def test_update_order():
-    # Create an order
     create_response = client.post(
         "/orders",
         json={
-            "product_id": 20,
-            "quantity": 2,
-            "price": 500
+            "product_id": 2,
+            "quantity": 2
         }
     )
 
@@ -106,7 +224,6 @@ def test_update_order():
 
     order_id = create_response.json()["id"]
 
-    # Update the order
     response = client.put(
         f"/orders/{order_id}",
         json={
@@ -122,9 +239,7 @@ def test_update_order():
     assert data["id"] == order_id
     assert data["quantity"] == 5
     assert data["status"] == "CONFIRMED"
-
-    # 5 × 500 = 2500
-    assert data["total_amount"] == 2500
+    assert data["total_amount"] == data["price"] * 5
 
 
 def test_update_order_not_found():
@@ -144,13 +259,11 @@ def test_update_order_not_found():
 
 
 def test_delete_order():
-    # Create an order
     create_response = client.post(
         "/orders",
         json={
-            "product_id": 30,
-            "quantity": 1,
-            "price": 100
+            "product_id": 2,
+            "quantity": 1
         }
     )
 
@@ -158,7 +271,6 @@ def test_delete_order():
 
     order_id = create_response.json()["id"]
 
-    # Delete the order
     response = client.delete(f"/orders/{order_id}")
 
     assert response.status_code == 200
@@ -167,7 +279,6 @@ def test_delete_order():
 
     assert data["message"] == "Order deleted successfully"
 
-    # Verify that order no longer exists
     get_response = client.get(f"/orders/{order_id}")
 
     assert get_response.status_code == 404
@@ -188,33 +299,18 @@ def test_create_order_invalid_quantity():
         "/orders",
         json={
             "product_id": 2,
-            "quantity": 0,
-            "price": 55000
+            "quantity": 0
         }
     )
 
     assert response.status_code == 422
 
 
-def test_create_order_invalid_price():
+def test_create_order_missing_quantity():
     response = client.post(
         "/orders",
         json={
-            "product_id": 2,
-            "quantity": 3,
-            "price": 0
-        }
-    )
-
-    assert response.status_code == 422
-
-
-def test_create_order_missing_field():
-    response = client.post(
-        "/orders",
-        json={
-            "product_id": 2,
-            "quantity": 3
+            "product_id": 2
         }
     )
 

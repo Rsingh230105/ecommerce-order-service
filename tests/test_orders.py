@@ -1,6 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -53,6 +54,15 @@ def override_db(session):
 
 def clear_db_override():
     app.dependency_overrides.pop(main.get_db, None)
+
+
+@pytest.fixture
+def mock_product_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_product",
+        lambda product_id: {"id": product_id, "price": 25.0},
+    )
 
 
 def test_health_check():
@@ -141,6 +151,7 @@ def test_create_order_rolls_back_when_flush_fails(monkeypatch):
     assert not any(isinstance(instance, OutboxEvent) for instance in session.added)
 
 
+@pytest.mark.usefixtures("mock_product_service")
 def test_create_order():
     response = client.post(
         "/orders",
@@ -175,6 +186,7 @@ def test_get_orders():
     assert isinstance(data, list)
 
 
+@pytest.mark.usefixtures("mock_product_service")
 def test_get_order_by_id():
     create_response = client.post(
         "/orders",
@@ -211,6 +223,7 @@ def test_get_order_not_found():
     assert data["detail"] == "Order not found"
 
 
+@pytest.mark.usefixtures("mock_product_service")
 def test_update_order():
     create_response = client.post(
         "/orders",
@@ -258,6 +271,7 @@ def test_update_order_not_found():
     assert data["detail"] == "Order not found"
 
 
+@pytest.mark.usefixtures("mock_product_service")
 def test_delete_order():
     create_response = client.post(
         "/orders",

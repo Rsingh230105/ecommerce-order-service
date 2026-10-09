@@ -75,6 +75,8 @@ python -m pytest
 
 Some API CRUD tests require a reachable PostgreSQL database. Outbox-focused tests use controlled test sessions. Run the suite against a disposable test database and check any database-dependent test setup before interpreting the result.
 
+Order API tests mock Product Service responses; they do not require a running Product Service.
+
 ## How it connects to the application
 
 - ALB forwards `/orders` and `/orders/*` to the Order API on port 8001.

@@ -91,6 +91,20 @@ Order API tests mock Product Service responses; they do not require a running Pr
 3. Test publisher crash/retry behavior and lease-expiry scenarios against PostgreSQL, in addition to unit tests.
 4. Add order validation and lifecycle rules (for example, make clear whether updates to order quantity should emit a corresponding inventory event).
 
+## Publish the first development image to ECR
+
+The `Publish image to ECR (dev)` workflow is manually dispatched from the `dev` branch. It runs migrations and tests against disposable PostgreSQL, builds the image, then publishes the requested immutable version tag and the source commit SHA to `ecommerce-dev-order-service`. The default version tag is `v1.0.3`, matching `ecommerce-terraform/terraform.tfvars`. Use a new version tag for every publication; rerunning the same commit/tag is rejected because ECR tags are immutable.
+
+Before running the workflow:
+
+1. Merge this workflow to `dev`.
+2. Create the ECR repositories through the Terraform ECR-only bootstrap described in the [Terraform README](../ecommerce-terraform/README.md#publish-images-before-the-development-stack).
+3. In this GitHub repository, set Actions repository variables `AWS_REGION=ap-south-1` and `AWS_ECR_PUBLISH_ROLE_ARN=<dedicated-role-arn>`.
+4. Configure that role's OIDC trust for `token.actions.githubusercontent.com`, audience `sts.amazonaws.com`, and subject `repo:Rsingh230105/ecommerce-order-service:ref:refs/heads/dev`. Grant `ecr:DescribeRepositories`, `ecr:DescribeImages`, `ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, and `ecr:PutImage` scoped to `ecommerce-dev-order-service`. `ecr:GetAuthorizationToken` needs `Resource: "*"`.
+5. In Actions, select **Publish image to ECR (dev)**, choose branch `dev`, and enter a new version tag matching the Terraform image tag.
+
+Verify the tag exists in ECR before applying the full Terraform stack. Publishing an image does not create ECS services or deploy the application. Do not enable the separate `AWS_ECR_ECS_DEPLOY_ENABLED` deployment workflow until the infrastructure has been applied and its ECS services are available.
+
 ## CI and development deployment
 
 The `CI and deploy (dev)` GitHub Actions workflow runs on pull requests and pushes to `dev`, and can be manually dispatched for an initial deployment or redeployment. It starts a disposable PostgreSQL 16 test database, runs the test suite, and verifies the Docker image builds.

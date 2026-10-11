@@ -1,6 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -10,6 +11,21 @@ from app.models import Order, OutboxEvent
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def mock_product_service(monkeypatch):
+    product_prices = {
+        2: 55000.0,
+        10: 1000.0,
+        20: 500.0,
+        30: 100.0,
+    }
+    monkeypatch.setattr(
+        main,
+        "get_product",
+        lambda product_id: {"price": product_prices.get(product_id, 1000.0)},
+    )
 
 
 class FakeSession:
@@ -147,7 +163,6 @@ def test_create_order():
         json={
             "product_id": 2,
             "quantity": 3,
-            "price": 55000
         }
     )
 
@@ -183,7 +198,6 @@ def test_get_order_by_id():
         json={
             "product_id": 10,
             "quantity": 2,
-            "price": 1000
         }
     )
 
@@ -222,7 +236,6 @@ def test_update_order():
         json={
             "product_id": 20,
             "quantity": 2,
-            "price": 500
         }
     )
 
@@ -274,7 +287,6 @@ def test_delete_order():
         json={
             "product_id": 30,
             "quantity": 1,
-            "price": 100
         }
     )
 
@@ -313,20 +325,18 @@ def test_create_order_invalid_quantity():
         json={
             "product_id": 2,
             "quantity": 0,
-            "price": 55000
         }
     )
 
     assert response.status_code == 422
 
 
-def test_create_order_invalid_price():
+def test_create_order_invalid_product_id():
     response = client.post(
         "/orders",
         json={
-            "product_id": 2,
+            "product_id": 0,
             "quantity": 3,
-            "price": 0
         }
     )
 
@@ -338,7 +348,6 @@ def test_create_order_missing_field():
         "/orders",
         json={
             "product_id": 2,
-            "quantity": 3
         }
     )
 

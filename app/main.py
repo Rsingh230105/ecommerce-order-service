@@ -69,7 +69,7 @@ def create_order(
     db: Session = Depends(get_db)
 ):
     product = get_product(order.product_id)
-    product_price = float(product["price"])
+    product_price = product["price"]
     total_amount = order.quantity * product_price
 
     new_order = Order(
